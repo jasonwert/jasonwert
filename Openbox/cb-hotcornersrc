@@ -1,0 +1,5 @@
+[Hot Corners]
+#top_left_corner_command = cb-aerosnap --left
+#top_right_corner_command = cb-aerosnap --right
+bottom_left_corner_command = skippy-xd-fix
+bottom_right_corner_command =
