@@ -1,0 +1,217 @@
+#! /bin/bash
+
+# This periodically reads mtab check the status of nework shares,
+# and unmounts recently inactive shares.  All inactive shares are then issued a
+# ping.  Responsive systems are then mounted.
+
+# This goes in /usr/local/bin/automount && sudo chmod 755 /usr/local/bin/automount
+
+
+if [ $1 == start ]
+then
+  Command=0 # start
+else
+  if [ $1 == stop ]
+  then
+    Command=1 # stop
+  else
+    echo "Usage: automount {start|stop} FILE [-v]"
+    echo "  Recommend usage is via /etc/init.d/automount."
+    echo "  FILE is requried and should be the location of the configuration file."
+    echo "  -v enables verbose mode to monitor process."
+    echo
+    exit 1
+  fi
+fi
+
+Delay=60 # default number of seconds between checks
+ConfFile=$2
+
+if [ "$3" == "-v" ]
+then
+  VerboseMode=1
+else
+  VerboseMode=0
+fi
+
+# Read configuration file to get shares
+i=0 # tracks number of shares/mounts
+j=0 # tracks information for each share/mount to ensure gathers enough
+while read line
+do
+  if [ `echo ${line}|grep -c '^[[:blank:]]*#'` -eq 0 ] # not a comment
+  then
+    if [ `echo ${line}|grep -c '[[:alnum:]]'` -eq 1 ] # not a blank line (strictly, a line that contains letters or numbers)
+    then
+      if [ `echo ${line}|grep -c '^[[:blank:]]*autocreate'` -eq 1 ] # autocreate tag
+      then
+        ShareMountAuto[$i]=1 # set autocreate on
+      else
+        if [ `echo ${line}|grep -c '^delay='` -eq 1 ] # delay line
+        then
+          Delay=`echo ${line}|awk -F = '{print $2;}'`
+        else
+          if [ $j == 3 ] # last share has completed information, start a new share
+          then
+            (( i++ )) # increment shares
+            j=1 # reset information counter
+            ShareMountAuto[$i]=0 # default no autocreate
+          else
+            (( j++ )) # increment information counter
+          fi
+          if [ `echo ${line}|grep -c '^//'` -eq 1 ] # share line
+          then
+            ShareAddresses[$i]=`echo "${line}"|awk -F / '{print $3;}'`
+            Shares[$i]=${line}
+          else
+            if [ `echo ${line}|grep -c '^-'` -eq 1 ] # mount options line
+            then
+              ShareMountOptions[$i]=${line}
+            else
+              ShareMounts[$i]=${line} # assume mount line
+            fi
+          fi      
+        fi
+      fi
+    fi
+  fi
+done < $ConfFile
+
+if [ $VerboseMode == 1 ]
+then
+  # output result of parsing configuration file
+  echo "Parsing $ConfFile produced following mount commands:"
+  for (( i = 0 ; i < ${#Shares[@]} ; i++ ))
+  do
+    if [ ${ShareMountAuto[$i]} == 1 ]
+    then
+      echo "  (Autocreate)" ${ShareMountOptions[$i]} "${Shares[$i]}" "${ShareMounts[$i]}"
+    else
+      echo " " ${ShareMountOptions[$i]} "${Shares[$i]}" "${ShareMounts[$i]}"
+    fi
+  done
+fi
+
+if [ $Command -eq 0 ] # start
+  then
+    # Check status of all shares, every Delay seconds
+    while [ 1 ]
+    do
+      for (( i = 0 ; i < ${#Shares[@]} ; i++ ))
+      do
+        if [ $VerboseMode == 1 ]
+        then
+          echo
+          echo "Checking ${Shares[$i]}"
+        fi
+        if [ `grep -c "${ShareMounts[$i]}" /etc/mtab` -ne 0 ] # share is mounted, make sure still live
+        then
+          if [ $VerboseMode == 1 ]
+          then
+            echo "  ${Shares[$i]} is mounted"
+          fi
+          if [ $VerboseMode == 1 ]
+          then
+            ping -c 1 "${ShareAddresses[$i]}"
+          else
+            ping -c 1 "${ShareAddresses[$i]}" > /dev/null
+          fi
+          if [ $? -ne 0 ] # ping failed
+          then
+            if [ $VerboseMode == 1 ]
+            then
+              echo "  ${ShareAddresses[$i]} ping failed, beginning unmount"
+            fi
+            if [ $VerboseMode == 1 ]
+            then
+              umount -l "${ShareMounts[$i]}" # unmount
+            else
+              umount -l "${ShareMounts[$i]}" > /dev/null # unmount
+            fi
+            if [ ${ShareMountAuto[$i]} == 1 ] # auto create directory
+            then
+              if [ $VerboseMode == 1 ]
+              then
+                echo "  removing ${ShareMounts[$i]}"
+              fi
+              if [ $VerboseMode == 1 ]
+              then
+                rmdir ${ShareMounts[$i]} # delete mount directory
+              else
+                rmdir ${ShareMounts[$i]} 2> /dev/null # delete mount directory
+              fi
+            fi
+          else
+            if [ $VerboseMode == 1 ]
+            then
+              echo "  ${ShareAddresses[$i]} ping succeeded, keeping mount"
+            fi
+          fi
+        else # share is not mounted
+          if [ $VerboseMode == 1 ]
+          then
+            echo "  ${Shares[$i]} is not mounted"
+          fi
+          if [ $VerboseMode == 1 ]
+          then
+            ping -c 1 "${ShareAddresses[$i]}"
+          else
+            ping -c 1 "${ShareAddresses[$i]}" > /dev/null
+          fi
+          if [ $? -eq 0 ] # ping succeeded
+          then
+            if [ $VerboseMode == 1 ]
+            then
+              echo "  ${ShareAddresses[$i]} ping succeeded, beginning mount"
+            fi
+            if [ ${ShareMountAuto[$i]} == 1 ] # auto create directory
+            then
+              if [ $VerboseMode == 1 ]
+              then
+                echo "  creating ${ShareMounts[$i]}"
+              fi
+              mkdir "${ShareMounts[$i]}" # create mount directory
+            fi
+            if [ $VerboseMode == 1 ]
+            then
+              echo "  mounting ${ShareAddresses[$i]}"
+            fi
+            mount ${ShareMountOptions[$i]} "${Shares[$i]}" "${ShareMounts[$i]}" # mount
+          else
+            if [ $VerboseMode == 1 ]
+            then
+              echo "  ${ShareAddresses[$i]} ping failed, not mounting"
+            fi
+          fi
+        fi
+      done
+      if [ $VerboseMode == 1 ]
+      then
+        echo
+        echo "Waiting $Delay seconds...."
+      fi
+      sleep $Delay # sleep until next round of pings
+    done
+else # stop
+    # Unmount all shares, whether known to be mounted or not
+    if [ $VerboseMode == 1 ]
+    then
+      echo
+      echo "Unmounting all automount shares..."
+    fi
+    for (( i = 0 ; i < ${#ShareMounts[@]} ; i++ ))
+    do
+      umount -l "${ShareMounts[$i]}" 2> /dev/null # unmount
+      if [ ${ShareMountAuto[$i]} == 1 ] # auto create directory
+      then
+        if [ $VerboseMode == 1 ]
+        then
+          rmdir "${ShareMounts[$i]}" # remove mount directory
+        else
+          rmdir "${ShareMounts[$i]}" 2> /dev/null # remove mount directory
+        fi
+      fi
+    done
+fi
+
+exit 0
